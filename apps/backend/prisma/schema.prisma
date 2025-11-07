@@ -1,0 +1,417 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// USER & AUTHENTICATION
+// ============================================
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  passwordHash  String
+  name          String?
+  avatar        String?
+  plan          PlanTier  @default(FREE)
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  lastLoginAt   DateTime?
+
+  // Relations
+  personas      Persona[]
+  teams         TeamMember[]
+  apiKeys       ApiKey[]
+  subscriptions Subscription[]
+
+  @@index([email])
+}
+
+enum PlanTier {
+  FREE
+  STARTER
+  PRO
+  GROWTH
+  ENTERPRISE
+}
+
+model Team {
+  id          String   @id @default(uuid())
+  name        String
+  slug        String   @unique
+  avatar      String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  members     TeamMember[]
+  personas    Persona[]
+
+  @@index([slug])
+}
+
+model TeamMember {
+  id        String   @id @default(uuid())
+  role      TeamRole @default(MEMBER)
+
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  teamId    String
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, teamId])
+  @@index([userId])
+  @@index([teamId])
+}
+
+enum TeamRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+// ============================================
+// PERSONA CORE
+// ============================================
+
+model Persona {
+  id              String   @id @default(uuid())
+  name            String
+  description     String?
+  avatar          String?
+
+  // Persona Configuration
+  systemPrompt    String   @default("")
+  toneConfig      Json     // { formality: 5, humor: 7, technical: 4, empathy: 8, energy: 6 }
+  guardrails      Json     // { topicsToAvoid: [], responseLimits: {}, brandValues: [] }
+
+  // Memory & Context
+  qdrantCollection String?  // Unique collection ID in Qdrant
+  memoryEnabled    Boolean  @default(true)
+  memoryRetention  Int      @default(90) // Days to retain memory
+
+  // Status
+  isActive         Boolean  @default(true)
+  isPublic         Boolean  @default(false) // For marketplace
+
+  // Ownership
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  teamId          String?
+  team            Team?    @relation(fields: [teamId], references: [id], onDelete: SetNull)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  documents       Document[]
+  deployments     Deployment[]
+  conversations   Conversation[]
+  messages        Message[]
+  analytics       AnalyticsEvent[]
+
+  @@index([userId])
+  @@index([teamId])
+  @@index([isPublic])
+}
+
+// ============================================
+// KNOWLEDGE BASE
+// ============================================
+
+model Document {
+  id          String   @id @default(uuid())
+  filename    String
+  fileType    String   // pdf, txt, docx, url, etc.
+  fileSize    Int      // bytes
+  url         String?  // If uploaded to S3/storage
+
+  // Processing Status
+  status      DocumentStatus @default(PENDING)
+  error       String?
+
+  // Vector Storage
+  chunkCount  Int      @default(0)
+  vectorIds   String[] // Array of vector IDs in Qdrant
+
+  // Metadata
+  metadata    Json     // { source: 'upload', tags: [], etc. }
+
+  personaId   String
+  persona     Persona  @relation(fields: [personaId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([personaId])
+  @@index([status])
+}
+
+enum DocumentStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+// ============================================
+// DEPLOYMENTS & INTEGRATIONS
+// ============================================
+
+model Deployment {
+  id          String   @id @default(uuid())
+  channel     Channel
+  isActive    Boolean  @default(true)
+
+  // Channel-specific Configuration
+  config      Json     // { botToken, webhookUrl, widgetColor, etc. }
+
+  // Metadata
+  metadata    Json?    // { lastMessageAt, totalMessages, etc. }
+
+  personaId   String
+  persona     Persona  @relation(fields: [personaId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  conversations Conversation[]
+
+  @@unique([personaId, channel])
+  @@index([personaId])
+  @@index([channel])
+}
+
+enum Channel {
+  WEB_CHAT
+  TELEGRAM
+  WHATSAPP
+  DISCORD
+  INSTAGRAM
+  SLACK
+  EMAIL
+  API
+}
+
+// ============================================
+// CONVERSATIONS & MESSAGES
+// ============================================
+
+model Conversation {
+  id            String   @id @default(uuid())
+
+  // External User Info
+  externalUserId String?  // User ID from the platform (Telegram user ID, etc.)
+  externalUserData Json?  // { username, name, avatar, etc. }
+
+  // Conversation State
+  isActive      Boolean  @default(true)
+  lastMessageAt DateTime @default(now())
+  messageCount  Int      @default(0)
+
+  // Context & Memory
+  context       Json?    // Conversation-specific context
+  summary       String?  // AI-generated summary of conversation
+
+  personaId     String
+  persona       Persona  @relation(fields: [personaId], references: [id], onDelete: Cascade)
+
+  deploymentId  String
+  deployment    Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Relations
+  messages      Message[]
+
+  @@index([personaId])
+  @@index([deploymentId])
+  @@index([externalUserId])
+  @@index([lastMessageAt])
+}
+
+model Message {
+  id              String   @id @default(uuid())
+
+  // Message Content
+  content         String
+  role            MessageRole
+
+  // Message Metadata
+  metadata        Json?    // { tokens, model, processingTime, etc. }
+
+  // Performance Tracking
+  rating          Int?     // 1-5 stars or thumbs up/down (-1, 1)
+  feedback        String?  // User feedback text
+
+  // Context Used
+  contextVectors  String[] // Vector IDs used for this response
+
+  conversationId  String
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  personaId       String
+  persona         Persona  @relation(fields: [personaId], references: [id], onDelete: Cascade)
+
+  createdAt       DateTime @default(now())
+
+  @@index([conversationId])
+  @@index([personaId])
+  @@index([role])
+  @@index([createdAt])
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+// ============================================
+// ANALYTICS & TRACKING
+// ============================================
+
+model AnalyticsEvent {
+  id          String   @id @default(uuid())
+
+  // Event Type
+  eventType   EventType
+  eventData   Json     // Flexible event-specific data
+
+  // Context
+  channel     Channel?
+  metadata    Json?
+
+  personaId   String
+  persona     Persona  @relation(fields: [personaId], references: [id], onDelete: Cascade)
+
+  timestamp   DateTime @default(now())
+
+  @@index([personaId])
+  @@index([eventType])
+  @@index([timestamp])
+}
+
+enum EventType {
+  MESSAGE_SENT
+  MESSAGE_RECEIVED
+  CONVERSATION_STARTED
+  CONVERSATION_ENDED
+  LEAD_CAPTURED
+  LINK_CLICKED
+  FEEDBACK_RECEIVED
+  DEPLOYMENT_ACTIVATED
+  DEPLOYMENT_DEACTIVATED
+}
+
+// ============================================
+// BILLING & SUBSCRIPTIONS
+// ============================================
+
+model Subscription {
+  id              String   @id @default(uuid())
+
+  // Stripe Integration
+  stripeCustomerId      String?
+  stripeSubscriptionId  String?
+  stripePriceId         String?
+
+  // Plan Details
+  plan            PlanTier
+  status          SubscriptionStatus @default(ACTIVE)
+
+  // Billing Period
+  currentPeriodStart DateTime
+  currentPeriodEnd   DateTime
+
+  // Usage Tracking
+  messagesUsed    Int      @default(0)
+  messagesLimit   Int
+
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([userId])
+  @@index([stripeCustomerId])
+  @@index([status])
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  PAST_DUE
+  TRIALING
+}
+
+// ============================================
+// API ACCESS
+// ============================================
+
+model ApiKey {
+  id          String   @id @default(uuid())
+  name        String
+  key         String   @unique
+  lastUsedAt  DateTime?
+
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([key])
+}
+
+// ============================================
+// MARKETPLACE (Future)
+// ============================================
+
+model MarketplaceListing {
+  id          String   @id @default(uuid())
+
+  // Listing Details
+  title       String
+  description String
+  price       Decimal  @db.Decimal(10, 2)
+  category    String
+  tags        String[]
+
+  // Persona Snapshot
+  personaSnapshot Json  // Frozen copy of persona config
+
+  // Stats
+  sales       Int      @default(0)
+  rating      Float?
+
+  // Ownership
+  sellerId    String
+
+  isActive    Boolean  @default(true)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([category])
+  @@index([sellerId])
+  @@index([isActive])
+}
